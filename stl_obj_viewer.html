@@ -1,0 +1,687 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>3D Model Viewer — STL • OBJ</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --accent: #0078D7;
+      --bg: #0f1114;
+      --panel: #1b1f25;
+      --stroke: rgba(255,255,255,.12);
+      --text: #f3f3f4;
+      --radius: 6px;
+      --shadow: 0 6px 18px rgba(0,0,0,.35);
+    }
+    html, body{ height: 100%; }
+    body{
+      margin: 0;
+      font-family: "Segoe UI", Inter, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+    }
+    .titlebar{
+      display: grid;
+      grid-template-columns: 28px 1fr auto;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 10px;
+      background: linear-gradient(180deg, #1b1f25, #161a1f);
+      border-bottom: 1px solid var(--stroke);
+    }
+    .title-text{ font-weight: 600; }
+    .window-controls button{
+      width: 45px; height: 30px;
+      border: none; background: transparent; color: var(--text);
+      cursor: default;
+    }
+    .window-controls button:hover{ background: rgba(255,255,255,.06); }
+    .window-controls button.close:hover{ background: #c42b1c; color: #fff; }
+    .commandbar{
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 8px 10px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--stroke);
+      position: relative; z-index: 5;
+    }
+    .btn{
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--stroke);
+      background: #232831; color: var(--text);
+      box-shadow: 0 1px 0 rgba(0,0,0,.04);
+      cursor: pointer;
+      user-select: none;
+    }
+    .btn:hover{ outline: 1px solid rgba(255,255,255,.1); }
+    .btn.primary{ background: var(--accent); color:#fff; border-color: transparent; }
+    .sep{ width:1px; height:28px; background: var(--stroke); margin: 0 4px; }
+    .dropdown{ position: relative; }
+    .menu{
+      position:absolute; top: calc(100% + 6px); left: 0;
+      min-width: 220px; padding: 6px;
+      display: none; flex-direction: column; gap: 2px;
+      border: 1px solid var(--stroke); border-radius: 6px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      z-index: 20;
+    }
+    .dropdown.open .menu{ display: flex; }
+    .menu button{
+      text-align: left; padding: 8px 10px; border: none; background: transparent; color: var(--text); border-radius: 4px;
+    }
+    .menu button:hover{ background: rgba(255,255,255,.06); }
+    .color-swatch{ width: 28px; height: 28px; border-radius: 4px; border: 1px solid var(--stroke); overflow: hidden; }
+    .color-swatch input{ width: 100%; height: 100%; padding:0; border:none; background:transparent; appearance: none; }
+    main{ flex: 1 1 auto; display: grid; grid-template-rows: 1fr; padding: 10px; }
+    #viewer{
+      position: relative;
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius);
+      background: #0b0f16;
+      overflow: hidden;
+      z-index: 1;
+    }
+    #viewer .surface{ position: absolute; inset: 0; z-index: 0; }
+    canvas{ width:100%; height:100%; display:block; }
+    .statusbar{
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px; align-items: center;
+      padding: 6px 10px;
+      border-top: 1px solid var(--stroke);
+      background: var(--panel);
+      font-size: 12px;
+    }
+    dialog#aboutDialog{
+      color: #fff;
+      background: rgba(20,20,20,0.9);
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 10px;
+      padding: 16px 18px;
+      max-width: 640px;
+    }
+    dialog::backdrop{ background: rgba(0,0,0,.35); }
+    :focus-visible{ outline: 2px solid var(--accent); outline-offset: 1px; }
+    .hidden{ display: none !important; }
+    .hint{ opacity:.9; font-size:12px; }
+  </style>
+</head>
+<body>
+  <header class="titlebar">
+    <img alt="App" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 24 24' fill='none' stroke='%230078D7' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v7a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 15z'/%3E%3Cpath d='M3.3 7L12 12l8.7-5'/%3E%3C/svg%3E">
+    <div class="title-text">3D Model Viewer — STL • OBJ</div>
+    <div class="window-controls">
+      <button title="Minimize">—</button>
+      <button title="Maximize">▢</button>
+      <button class="close" title="Close">✕</button>
+    </div>
+  </header>
+  <nav class="commandbar" aria-label="Commands">
+    <button id="openBtn" class="btn primary" type="button">Open Model (STL/OBJ)</button>
+    <input type="file" id="fileInput" accept=".stl,.obj,.mtl,.png,.jpg,.jpeg" multiple class="hidden"/>
+    <button id="resetButton" class="btn" type="button">Reset View</button>
+    <button id="closeFileButton" class="btn" type="button">Close</button>
+    <div class="sep" role="separator" aria-orientation="vertical"></div>
+    <div class="dropdown" id="viewDrop">
+      <button class="btn" id="viewBtn" type="button">View</button>
+      <div class="menu" role="menu" aria-label="View presets">
+        <button id="topViewButton" type="button">Top</button>
+        <button id="bottomViewButton" type="button">Bottom</button>
+        <button id="frontViewButton" type="button">Front</button>
+        <button id="backViewButton" type="button">Back</button>
+        <button id="leftViewButton" type="button">Left</button>
+        <button id="rightViewButton" type="button">Right</button>
+      </div>
+    </div>
+    <div class="dropdown" id="projDrop">
+      <button class="btn" id="toggleProjectionButton" type="button">Projection: Perspective</button>
+      <div class="menu" role="menu" aria-label="Projection mode">
+        <button id="setPerspective" type="button">Set Perspective</button>
+        <button id="setOrthographic" type="button">Set Orthographic</button>
+      </div>
+    </div>
+    <div class="dropdown" id="colorDrop">
+      <button class="btn" id="colorBtn" type="button">Color</button>
+      <div class="menu" role="menu" aria-label="Color">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;">
+          <span>Object Color</span>
+          <span class="color-swatch"><input type="color" id="colorInput" /></span>
+        </div>
+      </div>
+    </div>
+    <div class="dropdown" id="unitsDrop">
+      <button class="btn" id="unitsBtn" type="button">Model Units: mm</button>
+      <div class="menu" role="menu" aria-label="Model Units">
+        <button id="unitsMM" type="button">Millimeters (mm)</button>
+        <button id="unitsCM" type="button">Centimeters (cm)</button>
+        <button id="unitsIN" type="button">Inches (in)</button>
+      </div>
+    </div>
+    <div style="margin-left:auto; display:flex; gap:8px;">
+      <button id="aboutButton" class="btn" type="button">About</button>
+    </div>
+  </nav>
+  <main>
+    <section id="viewer" aria-label="3D Viewer">
+      <div class="surface">
+        <canvas id="viewerCanvas"></canvas>
+        <div id="loadingIndicator" class="hidden" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:600;">Loading model…</div>
+      </div>
+    </section>
+  </main>
+  <footer class="statusbar">
+    <div>Programmer: Bob Paydar</div>
+    <div id="dimensionsDisplay" style="text-align:center;"></div>
+    <div id="statusMessage" style="text-align:right;">Ready</div>
+  </footer>
+  <dialog id="aboutDialog">
+    <h2 style="margin:.25rem 0 0.5rem 0;">About 3D Model Viewer</h2>
+    <p style="margin:0.25rem 0;"><strong>Programmer:</strong> Bob Paydar</p>
+    <p style="opacity:.9; margin:0.25rem 0 0 0;">
+      Single‑file Three.js viewer. Load STL or OBJ (+MTL). Orbit, set orthographic/perspective, snap to views,
+      and see dimensions (L, W, H) in your selected model units.
+    </p>
+    <ul class="hint">
+      <li>OBJ with materials: select both <code>.obj</code> and its <code>.mtl</code> (and textures if any) together.</li>
+      <li>Dimensions assume millimeters when unknown.</li>
+    </ul>
+    <form method="dialog" style="margin-top:12px; text-align:right;">
+      <button class="btn" type="submit">Close</button>
+    </form>
+  </dialog>
+  <!-- Three.js core + loaders -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MTLLoader.js"></script>
+  <script>
+  // Program by: Bob Paydar — STL/OBJ viewer
+  (function(){
+    const container = document.getElementById('viewer');
+    const canvas = document.getElementById('viewerCanvas');
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const dimensionsDisplay = document.getElementById('dimensionsDisplay');
+    const statusMessage = document.getElementById('statusMessage');
+    const colorInput = document.getElementById('colorInput');
+    const aboutButton = document.getElementById('aboutButton');
+    const aboutDialog = document.getElementById('aboutDialog');
+    const fileInput = document.getElementById('fileInput');
+    const openBtn = document.getElementById('openBtn');
+    const closeFileButton = document.getElementById('closeFileButton');
+    const resetButton = document.getElementById('resetButton');
+    const toggleProjectionButton = document.getElementById('toggleProjectionButton');
+    const setPerspectiveButton = document.getElementById('setPerspective');
+    const setOrthographicButton = document.getElementById('setOrthographic');
+    const viewDrop = document.getElementById('viewDrop');
+    const projDrop = document.getElementById('projDrop');
+    const colorDrop = document.getElementById('colorDrop');
+    const unitsDrop = document.getElementById('unitsDrop');
+    const unitsBtn = document.getElementById('unitsBtn');
+    const unitsMM = document.getElementById('unitsMM');
+    const unitsCM = document.getElementById('unitsCM');
+    const unitsIN = document.getElementById('unitsIN');
+    const closeWindowButton = document.querySelector('.window-controls .close');
+    let scene, camera, renderer, controls, mesh;
+    let fileLoaded = false;
+    let isOrthographic = false;
+    let dimensionsVisuals = [];
+    const defaultColor = '#006400';
+    // === Units & raw-size tracking ===
+    let modelRawSize = null; // THREE.Vector3 in millimeters by default
+    let currentModelUnits = 'mm'; // 'mm' | 'cm' | 'in'
+    // ========= Init =========
+    init();
+    function init(){
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x0b0f16);
+      // Camera (Z up)
+      camera = new THREE.PerspectiveCamera(70, container.clientWidth / container.clientHeight, 0.1, 5000);
+      camera.up.set(0,0,1);
+      camera.position.set(80, 60, 100);
+      // Renderer
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      resizeRenderer();
+      window.addEventListener('resize', resizeRenderer);
+      // Grid at Z=0 (XY plane)
+      const grid = new THREE.GridHelper(500, 50, 0x2e3a46, 0x1e2a36);
+      grid.rotation.x = Math.PI / 2;
+      grid.position.z = 0.0;
+      scene.add(grid);
+      // Lights
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 0.6));
+      const dir1 = new THREE.DirectionalLight(0xffffff, 0.9);
+      dir1.position.set(1, 1, 1);
+      scene.add(dir1);
+      const dir2 = new THREE.DirectionalLight(0xffffff, 0.4);
+      dir2.position.set(-1, -1, -1);
+      scene.add(dir2);
+      // Controls
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.screenSpacePanning = false;
+      controls.minDistance = 1;
+      controls.maxDistance = 4000;
+      // Dropdown toggles
+      [viewDrop, projDrop, colorDrop, unitsDrop].forEach(dd => {
+        const btn = dd.querySelector('button.btn');
+        btn.addEventListener('click', (e)=>{
+          e.stopPropagation();
+          const already = dd.classList.contains('open');
+          document.querySelectorAll('.dropdown').forEach(x => x.classList.remove('open'));
+          if(!already) dd.classList.add('open');
+        });
+      });
+      document.addEventListener('click', ()=> document.querySelectorAll('.dropdown').forEach(x => x.classList.remove('open')));
+      // Units handlers
+      function setModelUnits(u){
+        currentModelUnits = u;
+        unitsBtn.textContent = 'Model Units: ' + (u === 'mm' ? 'mm' : u === 'cm' ? 'cm' : 'in');
+        showDimensions();
+      }
+      unitsMM.addEventListener('click', ()=> setModelUnits('mm'));
+      unitsCM.addEventListener('click', ()=> setModelUnits('cm'));
+      unitsIN.addEventListener('click', ()=> setModelUnits('in'));
+      // Close window button handler
+      closeWindowButton.addEventListener('click', () => aboutDialog.close());
+      animate();
+    }
+    function animate(){
+      requestAnimationFrame(animate);
+      controls && controls.update();
+      renderer.render(scene, camera);
+    }
+    function resizeRenderer(){
+      const rect = container.getBoundingClientRect();
+      const w = Math.max(320, rect.width);
+      const h = Math.max(240, rect.height);
+      if (camera.isPerspectiveCamera){
+        camera.aspect = w / h;
+      } else if (camera.isOrthographicCamera){
+        const aspect = w / h;
+        const size = getModelMaxDim() || 100;
+        const half = size/2;
+        camera.left = -half*aspect; camera.right = half*aspect; camera.top = half; camera.bottom = -half;
+      }
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h, false);
+    }
+    function getModelMaxDim(){
+      if(!mesh) return null;
+      const box = new THREE.Box3().setFromObject(mesh);
+      const s = box.getSize(new THREE.Vector3());
+      return Math.max(s.x, s.y, s.z);
+    }
+    function fitCameraToObject(object){
+      const box = new THREE.Box3().setFromObject(object);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const fov = (camera.isPerspectiveCamera ? camera.fov : 70) * (Math.PI/180);
+      const dist = Math.abs(maxDim/2 / Math.tan(fov/2));
+      camera.position.set(maxDim*1.1, maxDim*1.1, dist*1.4);
+      controls.target.copy(center);
+      controls.update();
+    }
+    function clearDimensions(){
+      dimensionsVisuals.forEach(obj=>{
+        scene.remove(obj);
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) obj.material.dispose();
+      });
+      dimensionsVisuals = [];
+      dimensionsDisplay.textContent = '';
+    }
+    function createTextSprite(text, position, color){
+      const c = document.createElement('canvas');
+      const ctx = c.getContext('2d');
+      const fs = 64;
+      ctx.font = fs + 'px Segoe UI, Arial';
+      const tw = Math.ceil(ctx.measureText(text).width)+8;
+      const th = fs + 8;
+      c.width = tw; c.height = th;
+      ctx.font = fs + 'px Segoe UI, Arial';
+      ctx.fillStyle = 'rgba(0,0,0,.65)';
+      ctx.fillRect(0,0,tw,th);
+      ctx.fillStyle = color;
+      ctx.fillText(text, 4, fs);
+      const tex = new THREE.CanvasTexture(c);
+      const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+      const spr = new THREE.Sprite(mat);
+      spr.scale.set(tw/18, th/18, 1);
+      spr.position.copy(position);
+      return spr;
+    }
+    function dimsInMM(){
+      if (!modelRawSize) return null;
+      return { x: modelRawSize.x, y: modelRawSize.y, z: modelRawSize.z };
+    }
+    function showDimensions(){
+      if (!mesh) return;
+      clearDimensions();
+      const box = new THREE.Box3().setFromObject(mesh);
+      const size = box.getSize(new THREE.Vector3());
+      const min = box.min, max = box.max;
+      const maxView = Math.max(size.x, size.y, size.z);
+      const lineGap = Math.max(0.15, 0.01 * maxView);
+      const labelGap = Math.max(0.6, 0.025 * maxView);
+      const dmm = dimsInMM();
+      if (!dmm) return;
+      let unitLabel = currentModelUnits;
+      let L, W, H;
+      if (currentModelUnits === 'mm') {
+        L = dmm.x; W = dmm.y; H = dmm.z;
+      } else if (currentModelUnits === 'cm') {
+        L = dmm.x / 10; W = dmm.y / 10; H = dmm.z / 10;
+      } else if (currentModelUnits === 'in') {
+        L = dmm.x / 25.4; W = dmm.y / 25.4; H = dmm.z / 25.4;
+      }
+      const unitSuffix = ' ' + unitLabel;
+      const lineLen = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(min.x, min.y - lineGap, 0),
+          new THREE.Vector3(max.x, min.y - lineGap, 0)
+        ]), new THREE.LineBasicMaterial({ color: 0xff4d4f })
+      );
+      scene.add(lineLen); dimensionsVisuals.push(lineLen);
+      const txtLen = createTextSprite('Length: ' + L.toFixed(2) + unitSuffix, new THREE.Vector3(min.x + size.x/2, min.y - labelGap, labelGap), '#ffdcdc');
+      scene.add(txtLen); dimensionsVisuals.push(txtLen);
+      const lineWid = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(max.x + lineGap, min.y, 0),
+          new THREE.Vector3(max.x + lineGap, max.y, 0)
+        ]), new THREE.LineBasicMaterial({ color: 0x22c55e })
+      );
+      scene.add(lineWid); dimensionsVisuals.push(lineWid);
+      const txtWid = createTextSprite('Width: ' + W.toFixed(2) + unitSuffix, new THREE.Vector3(max.x + labelGap, min.y + size.y/2, labelGap), '#d1fadd');
+      scene.add(txtWid); dimensionsVisuals.push(txtWid);
+      const lineH = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(min.x, min.y, 0),
+          new THREE.Vector3(min.x, min.y, size.z)
+        ]), new THREE.LineBasicMaterial({ color: 0x60a5fa })
+      );
+      scene.add(lineH); dimensionsVisuals.push(lineH);
+      const txtH = createTextSprite('Z: ' + H.toFixed(2) + unitSuffix, new THREE.Vector3(min.x, min.y, size.z/2 + labelGap*0.25), '#e3ecff');
+      scene.add(txtH); dimensionsVisuals.push(txtH);
+      dimensionsDisplay.textContent = 'L: ' + L.toFixed(2) + unitSuffix + ', W: ' + W.toFixed(2) + unitSuffix + ', H: ' + H.toFixed(2) + unitSuffix;
+      statusMessage.textContent = 'Model loaded';
+    }
+    function prepareGeometryForView(geometry){
+      geometry.computeBoundingBox();
+      let bb = geometry.boundingBox;
+      let sizeRaw = new THREE.Vector3().subVectors(bb.max, bb.min);
+      modelRawSize = sizeRaw.clone();
+      const maxDim0 = Math.max(sizeRaw.x, sizeRaw.y, sizeRaw.z) || 1;
+      const scaleFactor = 100 / maxDim0;
+      geometry.scale(scaleFactor, scaleFactor, scaleFactor);
+      geometry.computeBoundingBox();
+      bb = geometry.boundingBox;
+      const center = new THREE.Vector3().addVectors(bb.min, bb.max).multiplyScalar(0.5);
+      const translate = new THREE.Vector3(-center.x, -center.y, -bb.min.z);
+      geometry.translate(translate.x, translate.y, translate.z);
+      return geometry;
+    }
+    function addMeshToScene(geometryOrObject, materialColor){
+      if (mesh){
+        scene.remove(mesh);
+        if (mesh.geometry) mesh.geometry.dispose();
+        if (mesh.material) mesh.material.dispose();
+      }
+      clearDimensions();
+      if (geometryOrObject.isBufferGeometry || geometryOrObject.isGeometry){
+        const material = new THREE.MeshStandardMaterial({ color: materialColor || defaultColor, metalness: 0.3, roughness: 0.5 });
+        mesh = new THREE.Mesh(geometryOrObject, material);
+      } else {
+        mesh = geometryOrObject;
+      }
+      scene.add(mesh);
+      fileLoaded = true;
+      fitCameraToObject(mesh);
+      showDimensions();
+      resizeRenderer();
+    }
+    async function loadSTL(file){
+      loadingIndicator.classList.remove('hidden');
+      statusMessage.textContent = 'Loading ' + file.name + ' …';
+      const loader = new THREE.STLLoader();
+      const reader = new FileReader();
+      reader.onload = function(e){
+        try{
+          let geometry = loader.parse(e.target.result);
+          geometry = prepareGeometryForView(geometry);
+          colorInput.value = defaultColor;
+          addMeshToScene(geometry, defaultColor);
+        }catch(err){
+          console.error(err);
+          alert('Error loading STL. Make sure the file is valid.');
+          fileLoaded = false;
+          statusMessage.textContent = 'Error loading file.';
+        }finally{
+          loadingIndicator.classList.add('hidden');
+        }
+      };
+      reader.onerror = function(){
+        loadingIndicator.classList.add('hidden');
+        statusMessage.textContent = 'Error reading file.';
+      };
+      reader.readAsArrayBuffer(file);
+    }
+    async function loadOBJ(filesMap, objFile){
+      loadingIndicator.classList.remove('hidden');
+      statusMessage.textContent = 'Loading ' + objFile.name + ' …';
+      try{
+        const objURL = URL.createObjectURL(objFile);
+        const mtlFile = findSiblingMTL(filesMap, objFile.name);
+        if (mtlFile){
+          const mtlURL = URL.createObjectURL(mtlFile);
+          const mtlLoader = new THREE.MTLLoader();
+          mtlLoader.load(mtlURL, materials => {
+            materials.preload();
+            const loader = new THREE.OBJLoader();
+            loader.setMaterials(materials);
+            loader.load(objURL, obj => {
+              URL.revokeObjectURL(objURL); URL.revokeObjectURL(mtlURL);
+              const box = new THREE.Box3().setFromObject(obj);
+              const sizeRaw = box.getSize(new THREE.Vector3());
+              modelRawSize = sizeRaw.clone();
+              const maxDim0 = Math.max(sizeRaw.x, sizeRaw.y, sizeRaw.z) || 1;
+              const scaleFactor = 100 / maxDim0;
+              obj.scale.setScalar(scaleFactor);
+              const box2 = new THREE.Box3().setFromObject(obj);
+              const center = box2.getCenter(new THREE.Vector3());
+              const minz = box2.min.z;
+              obj.position.add(new THREE.Vector3(-center.x, -center.y, -minz));
+              addMeshToScene(obj);
+              loadingIndicator.classList.add('hidden');
+            }, undefined, err => {
+              console.error(err);
+              loadingIndicator.classList.add('hidden');
+              alert('Error parsing OBJ/MTL.');
+              statusMessage.textContent = 'Error loading file.';
+            });
+          }, undefined, err=>{
+            console.warn('MTL load failed, falling back to geometry-only OBJ.', err);
+            loadOBJGeometryOnly(objURL);
+          });
+        } else {
+          loadOBJGeometryOnly(objURL);
+        }
+        function loadOBJGeometryOnly(url){
+          const loader = new THREE.OBJLoader();
+          loader.load(url, obj => {
+            URL.revokeObjectURL(url);
+            const box = new THREE.Box3().setFromObject(obj);
+            const sizeRaw = box.getSize(new THREE.Vector3());
+            modelRawSize = sizeRaw.clone();
+            const maxDim0 = Math.max(sizeRaw.x, sizeRaw.y, sizeRaw.z) || 1;
+            const scaleFactor = 100 / maxDim0;
+            obj.traverse(n=>{ if(n.isMesh){ n.material = new THREE.MeshStandardMaterial({color: defaultColor, metalness:.3, roughness:.5}); }});
+            obj.scale.setScalar(scaleFactor);
+            const box2 = new THREE.Box3().setFromObject(obj);
+            const center = box2.getCenter(new THREE.Vector3());
+            const minz = box2.min.z;
+            obj.position.add(new THREE.Vector3(-center.x, -center.y, -minz));
+            addMeshToScene(obj);
+            loadingIndicator.classList.add('hidden');
+          }, undefined, err => {
+            console.error(err);
+            loadingIndicator.classList.add('hidden');
+            alert('Error parsing OBJ.');
+            statusMessage.textContent = 'Error loading file.';
+          });
+        }
+      }catch(e){
+        console.error(e);
+        alert('Error loading OBJ.');
+        statusMessage.textContent = 'Error loading file.';
+        loadingIndicator.classList.add('hidden');
+      }
+    }
+    function findSiblingMTL(filesMap, objName){
+      const base = objName.replace(/\.[^/.]+$/,'');
+      for (const [name, file] of filesMap){
+        const lower = name.toLowerCase();
+        if (lower.endsWith('.mtl')){
+          const mbase = lower.replace(/\.mtl$/,'');
+          if (mbase === base.toLowerCase()) return file;
+        }
+      }
+      return null;
+    }
+    function closeFile(){
+      if (mesh){ scene.remove(mesh); if (mesh.geometry) mesh.geometry.dispose(); if (mesh.material) mesh.material.dispose(); mesh = null; }
+      clearDimensions();
+      fileLoaded = false;
+      statusMessage.textContent = 'Ready';
+    }
+    function setCameraView(x,y,z){
+      if (!fileLoaded) return;
+      const box = new THREE.Box3().setFromObject(mesh);
+      const c = box.getCenter(new THREE.Vector3());
+      const s = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(s.x, s.y, s.z);
+      const dist = maxDim * 1.6;
+      const pos = new THREE.Vector3(x*dist, y*dist, z*dist);
+      camera.position.copy(c.clone().add(pos));
+      controls.target.copy(c);
+      controls.update();
+    }
+    function setProjection(mode){
+      const rect = container.getBoundingClientRect();
+      const aspect = rect.width / rect.height;
+      const position = camera.position.clone();
+      const target = controls.target.clone();
+      isOrthographic = (mode === 'ortho');
+      if (isOrthographic){
+        const maxDim = getModelMaxDim() || 100;
+        const half = maxDim/2;
+        camera = new THREE.OrthographicCamera(-half*aspect, half*aspect, half, -half, 0.1, 10000);
+        camera.up.set(0,0,1);
+        toggleProjectionButton.textContent = 'Projection: Orthographic';
+      } else {
+        camera = new THREE.PerspectiveCamera(70, aspect, 0.1, 5000);
+        camera.up.set(0,0,1);
+        toggleProjectionButton.textContent = 'Projection: Perspective';
+      }
+      camera.position.copy(position);
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.target.copy(target);
+      controls.update();
+      resizeRenderer();
+    }
+    // Wire events
+    openBtn.addEventListener('click', ()=> fileInput.click());
+    fileInput.addEventListener('change', async e => {
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      const filesMap = new Map(files.map(f => [f.name, f]));
+      const primary = files.find(f => {
+        const n = f.name.toLowerCase();
+        return n.endsWith('.stl') || n.endsWith('.obj');
+      });
+      if (!primary){
+        alert('Please select a model file (.stl, .obj).');
+        return;
+      }
+      const ext = primary.name.split('.').pop().toLowerCase();
+      if (ext === 'stl'){
+        await loadSTL(primary);
+      } else if (ext === 'obj'){
+        await loadOBJ(filesMap, primary);
+      } else {
+        alert('Unsupported model type.');
+      }
+    });
+    closeFileButton.addEventListener('click', closeFile);
+    resetButton.addEventListener('click', ()=> fileLoaded && fitCameraToObject(mesh));
+    document.getElementById('topViewButton').addEventListener('click', () => setCameraView(0, 0, 1));
+    document.getElementById('bottomViewButton').addEventListener('click', () => setCameraView(0, 0, -1));
+    document.getElementById('frontViewButton').addEventListener('click', () => setCameraView(0, 1, 0));
+    document.getElementById('backViewButton').addEventListener('click', () => setCameraView(0, -1, 0));
+    document.getElementById('leftViewButton').addEventListener('click', () => setCameraView(-1, 0, 0));
+    document.getElementById('rightViewButton').addEventListener('click', () => setCameraView(1, 0, 0));
+    toggleProjectionButton.addEventListener('click', ()=> setProjection(isOrthographic ? 'persp' : 'ortho'));
+    setPerspectiveButton.addEventListener('click', ()=> setProjection('persp'));
+    setOrthographicButton.addEventListener('click', ()=> setProjection('ortho'));
+    colorInput.addEventListener('input', e => {
+      if (!mesh) return;
+      if (mesh.isMesh){
+        mesh.material.color.set(e.target.value);
+      } else {
+        mesh.traverse(n => { if (n.isMesh && n.material && n.material.color){ n.material.color.set(e.target.value); } });
+      }
+    });
+    aboutButton.addEventListener('click', ()=> aboutDialog.showModal());
+  })();
+  </script>
+</body>
+</html>
